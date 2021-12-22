@@ -25,7 +25,9 @@
 	str_add				db "ADD "
 	str_cmp				db "CMP "
 	str_nul				db "?", 0Dh, 0Ah
-	str_ins				db 100h dup(0), 0h
+	str_ins				db 100h dup(' '), 0h
+	str_ins_code		db 0h, 0ffh dup(' ')
+	str_ins_code_str	db 0h, 0ffh dup(' ')
 	; str ins iterator
 	ins_iter			db 00h
 	; register strings
@@ -83,6 +85,8 @@
 	sign				db ' '
 	;
 	safe_op				db 00h
+	; 
+	cs_offset			dw 0100h
 .code
 start:
 	mov dx, @data
@@ -99,7 +103,10 @@ start:
 	inc cx
 	l003: ; infinite loop
 		clc
-		push cx
+		
+		call clear_str_ins_padding
+		mov ins_iter, 20
+		mov str_ins_code, 0
 		
 		call get_byte ; opcode
 		jc b003
@@ -129,6 +136,7 @@ start:
 	
 		call write_str_nul
 		write_str:
+			call write_offset_and_inscode
 			call write_ins_str
 		next:
 		pop cx
@@ -180,6 +188,87 @@ read_params:
 	b002:
 	mov [output_file], bl
 	ret
+
+; converts str_ins_code to hex string
+; sets CF if str_ins_code is empty
+; result in str_ins
+convert_ins_buffer_to_str:
+	clc
+	xor cx, cx
+	mov cl, str_ins_code
+	jcxz ret003
+	xor bx, bx
+	mov bx, 0
+	xor si, si
+	l011:
+		
+		push si bx cx
+		
+		mov al, [str_ins_code + si + 1]
+		call convert_al_to_hex_str
+		mov al, [hex_byte_buf + 0]
+		mov ah, [hex_byte_buf + 1]
+		
+		pop cx bx si 
+		
+		mov [str_ins_code_str + bx + 1], al
+		mov [str_ins_code_str + bx + 2], ah
+		add bx, 2
+		inc si
+	loop l011
+	mov str_ins_code_str, bl
+	ret
+	ret003:
+	stc
+	ret
+
+; blanks out first 20 bytes of str_ins
+clear_str_ins_padding:
+	xor bx, bx
+	mov cx, 0020
+	l013:
+		mov [str_ins + bx], ' '
+		inc bx
+	loop l013
+	ret
+
+; writes instruction offset in CS and instruction machine code
+; to the first 20 positions in str_ins and adds ins length to cs_offset
+; STATUS: not tested
+write_offset_and_inscode:
+	; convert cs offset to string
+	mov ax, cs_offset
+	call convert_ax_to_hex_str
+	
+	mov al, [hex_word_buf + 0]
+	mov ah, [hex_word_buf + 1]
+	mov dl, [hex_word_buf + 2]
+	mov dh, [hex_word_buf + 3]
+
+	; write cs offset
+	mov [str_ins + 0], al
+	mov [str_ins + 1], ah
+	mov [str_ins + 2], dl
+	mov [str_ins + 3], dh
+	mov [str_ins + 4], ' '
+	
+	; convert ins buffer to string
+	call convert_ins_buffer_to_str
+	jc ret004
+	xor bx, bx
+	xor cx, cx
+	mov cl, str_ins_code_str
+	l012:
+		mov al, [str_ins_code_str + bx + 1]
+		mov [str_ins + bx + 5], al
+		inc bx
+	loop l012
+	
+	xor bx, bx
+	mov bl, str_ins_code
+	add cs_offset, bx
+	ret004:
+	ret
 	
 ; parses add instruction
 ; STATUS: not tested	
@@ -229,7 +318,7 @@ parse_add1:
 	mov [str_ins + 1], 'D'
 	mov [str_ins + 2], 'D'
 	mov [str_ins + 3], ' '
-	mov ins_iter, 4
+	add ins_iter, 4
 	; parse modregrm
 	mov al, rdbyte
 	call parse_modregrm
@@ -302,7 +391,7 @@ parse_add2:
 	mov [str_ins + 1], 'D'
 	mov [str_ins + 2], 'D'
 	mov [str_ins + 3], ' '
-	mov ins_iter, 4
+	add ins_iter, 4
 	; append first operand
 	call append_mod_rm_str
 	jc exit010
@@ -354,7 +443,7 @@ parse_add3:
 	mov [str_ins + 5], al 
 	mov [str_ins + 6], ','
 	mov [str_ins + 7], ' ' 
-	mov ins_iter, 8
+	add ins_iter, 8
 	
 	cmp w, 1
 	jne cont022
@@ -426,7 +515,7 @@ parse_cmp1:
 	mov [str_ins + 1], 'M'
 	mov [str_ins + 2], 'P'
 	mov [str_ins + 3], ' '
-	mov ins_iter, 4
+	add ins_iter, 4
 	; parse modregrm
 	mov al, rdbyte
 	call parse_modregrm
@@ -759,7 +848,7 @@ parse_cmp2:
 	mov [str_ins + 1], 'M'
 	mov [str_ins + 2], 'P'
 	mov [str_ins + 3], ' '
-	mov ins_iter, 4
+	add ins_iter, 4
 	; append first operand
 	call append_mod_rm_str
 	jc exit006
@@ -858,7 +947,7 @@ parse_cmp3:
 	mov [str_ins + 5], al 
 	mov [str_ins + 6], ','
 	mov [str_ins + 7], ' ' 
-	mov ins_iter, 8
+	add ins_iter, 8
 	
 	cmp w, 1
 	jne cont008
@@ -922,15 +1011,27 @@ parse_call:
 parse_call_1:
 	clc
 	
+	; push opcode to str_ins_code
+	mov [str_ins_code + 1], al
+	mov str_ins_code, 1
+	
 	call get_byte
 	jc pc1_ex
 	mov al, rdbyte
 	mov [adr + 0], al
 	
+	; push byte to str_ins_code
+	mov [str_ins_code + 2], al
+	add str_ins_code, 1
+	
 	call get_byte
 	jc pc1_ex
 	mov al, rdbyte
 	mov [adr + 1], al
+	
+	; push byte to str_ins_code
+	mov [str_ins_code + 3], al
+	add str_ins_code, 1
 	
 	jmp pc2_cont
 	pc1_ex:
@@ -945,26 +1046,33 @@ parse_call_1:
 	call convert_ax_to_hex_str
 	mov al, [hex_word_buf + 0]
 	mov ah, [hex_word_buf + 1]
-	mov bl, [hex_word_buf + 2]
-	mov bh, [hex_word_buf + 3]
-	mov [str_ins +  0], 'C'
-	mov [str_ins +  1], 'A'
-	mov [str_ins +  2], 'L'
-	mov [str_ins +  3], 'L'
-	mov [str_ins +  4], ' '
-	mov [str_ins +  5], al
-	mov [str_ins +  6], ah
-	mov [str_ins +  7], bl
-	mov [str_ins +  8], bh
-	mov [str_ins +  9], 0Dh
-	mov [str_ins + 10], 0Ah
-	mov [str_ins + 11], 0h
+	mov dl, [hex_word_buf + 2]
+	mov dh, [hex_word_buf + 3]
+	
+	xor bx, bx
+	mov bl, ins_iter
+	
+	mov [str_ins + bx +  0], 'C'
+	mov [str_ins + bx +  1], 'A'
+	mov [str_ins + bx +  2], 'L'
+	mov [str_ins + bx +  3], 'L'
+	mov [str_ins + bx +  4], ' '
+	mov [str_ins + bx +  5], al
+	mov [str_ins + bx +  6], ah
+	mov [str_ins + bx +  7], dl
+	mov [str_ins + bx +  8], dh
+	mov [str_ins + bx +  9], 0Dh
+	mov [str_ins + bx + 10], 0Ah
+	mov [str_ins + bx + 11], 0h
 	ret
 ; 1111 1111 mod 010 r/m [posl.j.b. [posl.v.b.]]
 ; 1111 1111 mod 011 r/m [poslinkis]
 ; set CF on failure
 ; STATUS: not tested
 parse_call_24:
+	; push opcode to str_ins_code
+	mov [str_ins_code + 1], al
+	mov str_ins_code, 1
 	; read addresing byte
 	call get_byte
 	jne pc_cont0 
@@ -973,6 +1081,9 @@ parse_call_24:
 		ret
 	pc_cont0:
 	mov al, rdbyte
+	; push byte to str_ins_code
+	mov [str_ins_code + 2], al
+	add str_ins_code, 1
 	; look if reg is 010 or 011 else exit
 	call parse_modregrm
 	cmp reg, 010b
@@ -983,12 +1094,14 @@ parse_call_24:
 	pc_cont1:
 	; reg is okay, so this is some sort of call
 	; write "CALL "
-	mov [str_ins + 0], 'C'
-	mov [str_ins + 1], 'A'
-	mov [str_ins + 2], 'L'
-	mov [str_ins + 3], 'L'
-	mov [str_ins + 4], ' '
-	mov ins_iter, 5
+	xor bx, bx
+	mov bl, ins_iter
+	mov [str_ins + bx + 0], 'C'
+	mov [str_ins + bx + 1], 'A'
+	mov [str_ins + bx + 2], 'L'
+	mov [str_ins + bx + 3], 'L'
+	mov [str_ins + bx + 4], ' '
+	add ins_iter, 5
 	; special case mod = 11b and reg = 010b
 	cmp _mod, 11b
 	jne pc_cont4
@@ -1000,19 +1113,24 @@ parse_call_24:
 		shl bx, 1 ; * 2
 		mov al, [str_reg + bx + 16]
 		mov ah, [str_reg + bx + 17]
-		mov [str_ins + 5], al
-		mov [str_ins + 6], ah
-		mov [str_ins + 7], 0Dh
-		mov [str_ins + 8], 0Ah
-		mov [str_ins + 9], 0h
+		
+		xor bx, bx
+		mov bl, ins_iter
+		mov [str_ins + bx + 5], al
+		mov [str_ins + bx + 6], ah
+		mov [str_ins + bx + 7], 0Dh
+		mov [str_ins + bx + 8], 0Ah
+		mov [str_ins + bx + 9], 0h
 		ret
 	pc_cont4:
 	; write far if needed
 	cmp reg, 011b
 	jne pc_cont2
-		mov [str_ins + 5], 'F'
-		mov [str_ins + 6], 'A'
-		mov [str_ins + 7], 'R'
+		xor bx, bx
+		mov bl, ins_iter
+		mov [str_ins + bx + 0], 'F'
+		mov [str_ins + bx + 1], 'A'
+		mov [str_ins + bx + 2], 'R'
 		add ins_iter, 3
 	pc_cont2:
 	; write open bracket
@@ -1031,9 +1149,21 @@ parse_call_24:
 		call get_byte
 		jc pc_ex3
 		mov al, rdbyte
+		
+		; push byte to str_ins_code
+		mov [str_ins_code + 3], al
+		add str_ins_code, 1
+		
+		
 		push ax
 		call get_byte
 		jc pc_ex3
+		mov al, rdbyte
+		
+		; push byte to str_ins_code
+		mov [str_ins_code + 4], al
+		add str_ins_code, 1
+		
 		pop ax
 		mov ah, rdbyte
 		
@@ -1071,6 +1201,7 @@ parse_call_24:
 		
 		xor bx, bx
 		mov bl, ins_iter
+		
 		mov [str_ins + bx + 0], al
 		mov [str_ins + bx + 1], ah
 		add ins_iter, 2
@@ -1121,12 +1252,23 @@ parse_call_24:
 		pc_cont5:
 		
 		mov al, rdbyte
+		; push byte to str_ins_code
+		mov [str_ins_code + 3], al
+		add str_ins_code, 1
+		
+		
 		cmp _mod, 01b
 		je pc_write_1
 			; here goes writing 2 bytes and reading one extra
 			push ax
 			call get_byte
 			jc pc_ex2
+			mov al, rdbyte
+			; push byte to str_ins_code
+			mov [str_ins_code + 4], al
+			add str_ins_code, 1
+			
+			
 			pop ax
 			mov ah, rdbyte
 			
@@ -1197,26 +1339,50 @@ parse_call_24:
 ; STATUS: works
 parse_call_3:
 	clc
+	
+	; push opcode to str_ins_code
+	mov [str_ins_code + 1], al
+	mov str_ins_code, 1
+	
 	; read 4 bytes
 	call get_byte
 	jc pc3_ex
 	mov al, rdbyte
 	mov [adr + 0], al
 	
+	; push byte to str_ins_code
+	mov [str_ins_code + 2], al
+	add str_ins_code, 1
+	
+	
 	call get_byte
 	jc pc3_ex
 	mov al, rdbyte
 	mov [adr + 1], al
+	
+	; push byte to str_ins_code
+	mov [str_ins_code + 3], al
+	add str_ins_code, 1
+	
 	
 	call get_byte
 	jc pc3_ex
 	mov al, rdbyte
 	mov [segreg + 0], al
 	
+	; push byte to str_ins_code
+	mov [str_ins_code + 4], al
+	add str_ins_code, 1
+	
+	
 	call get_byte
 	jc pc3_ex
 	mov al, rdbyte
 	mov [segreg + 1], al
+	
+	; push byte to str_ins_code
+	mov [str_ins_code + 5], al
+	add str_ins_code, 1
 	
 	jmp pc3_cont
 	pc3_ex:
@@ -1230,36 +1396,47 @@ parse_call_3:
 	
 	mov al, [hex_word_buf + 0]
 	mov ah, [hex_word_buf + 1]
-	mov bl, [hex_word_buf + 2]
-	mov bh, [hex_word_buf + 3]
+	mov dl, [hex_word_buf + 2]
+	mov dh, [hex_word_buf + 3]
 	
 	; I know it's ugly but it's less code than doing loops
-	mov [str_ins +  0], 'C'
-	mov [str_ins +  1], 'A'
-	mov [str_ins +  2], 'L'
-	mov [str_ins +  3], 'L'
-	mov [str_ins +  4], ' '
-	mov [str_ins +  5], al
-	mov [str_ins +  6], ah
-	mov [str_ins +  7], bl
-	mov [str_ins +  8], bh
-	mov [str_ins +  9], ':'
+	
+	xor bx, bx
+	mov bl, ins_iter
+	
+	mov [str_ins + bx + 0], 'C'
+	mov [str_ins + bx + 1], 'A'
+	mov [str_ins + bx + 2], 'L'
+	mov [str_ins + bx + 3], 'L'
+	mov [str_ins + bx + 4], ' '
+	mov [str_ins + bx + 5], al
+	mov [str_ins + bx + 6], ah
+	mov [str_ins + bx + 7], dl
+	mov [str_ins + bx + 8], dh
+	mov [str_ins + bx + 9], ':'
+	
+	add ins_iter, 10
+	
 	; convert adr
 	mov al, [adr + 0]
 	mov ah, [adr + 1]
 	call convert_ax_to_hex_str
 	mov al, [hex_word_buf + 0]
 	mov ah, [hex_word_buf + 1]
-	mov bl, [hex_word_buf + 2]
-	mov bh, [hex_word_buf + 3]
+	mov dl, [hex_word_buf + 2]
+	mov dh, [hex_word_buf + 3]
 	
-	mov [str_ins + 10], al
-	mov [str_ins + 11], ah
-	mov [str_ins + 12], bl
-	mov [str_ins + 13], bh
-	mov [str_ins + 14], 0Dh
-	mov [str_ins + 15], 0Ah
-	mov [str_ins + 16], 0h
+	xor bx, bx
+	mov bl, ins_iter
+	
+	mov [str_ins + bx + 0], al
+	mov [str_ins + bx + 1], ah
+	mov [str_ins + bx + 2], dl
+	mov [str_ins + bx + 3], dh
+	mov [str_ins + bx + 4], 0Dh
+	mov [str_ins + bx + 5], 0Ah
+	mov [str_ins + bx + 6], 0h
+	
 	ret
 	
 ; expects addresing byte to be in AL
@@ -1284,15 +1461,24 @@ parse_pushf:
 	clc
 	cmp al, OP_PUSHF
 	jne ret001
+	; push opcode to str_ins_code
+	mov [str_ins_code + 1], al
+	mov str_ins_code, 1
 	; if opcode matched copy str_pushf to ins_str
-	mov cx, 7
 	xor bx, bx
-	l005:
-		mov dl, [str_pushf + bx]
-		mov [str_ins + bx], dl
-		inc bx
-	loop l005
-	mov [str_ins + bx], 0h
+	mov bl, ins_iter
+	
+	mov [str_ins + bx + 0], 'P'
+	mov [str_ins + bx + 1], 'U'
+	mov [str_ins + bx + 2], 'S'
+	mov [str_ins + bx + 3], 'H'
+	mov [str_ins + bx + 4], 'F'
+	mov [str_ins + bx + 5], 0dh
+	mov [str_ins + bx + 6], 0ah
+	mov [str_ins + bx + 7], 0h
+	
+	call write_offset_and_inscode
+	
 	ret
 	ret001:
 	stc
@@ -1306,15 +1492,23 @@ parse_popf:
 	clc
 	cmp al, OP_POPF
 	jne ret002
+	; push opcode to str_ins_code
+	mov [str_ins_code + 1], al
+	mov str_ins_code, 1
 	; if opcode matched copy str_pushf to ins_str
-	mov cx, 6
 	xor bx, bx
-	l007:
-		mov dl, [str_popf + bx]
-		mov [str_ins + bx], dl
-		inc bx
-	loop l007
-	mov [str_ins + bx], 0h
+	mov bl, ins_iter
+	
+	mov [str_ins + bx + 0], 'P'
+	mov [str_ins + bx + 1], 'O'
+	mov [str_ins + bx + 2], 'P'
+	mov [str_ins + bx + 3], 'F'
+	mov [str_ins + bx + 4], 0dh
+	mov [str_ins + bx + 5], 0ah
+	mov [str_ins + bx + 6], 0h
+	
+	call write_offset_and_inscode
+	
 	ret
 	ret002:
 	stc
